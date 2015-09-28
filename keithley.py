@@ -147,7 +147,7 @@ class Keithley2400(GpibInstrument):
             self.setNumPoints(numPts)
             self.setDelay(timeStep)
         else:
-            print "Error: bad arguments"
+            print("Error: bad arguments")
         return numPts
 
     # set what is being measured (VOLTage or CURRent or RESistance)
@@ -161,7 +161,7 @@ class Keithley2400(GpibInstrument):
             self.write("SENSE:FUNCTION:ON 'CURRENT:DC'")
             self.write("SENSE:FUNCTION:ON 'RESISTANCE'")
         else:
-            print "Expected one of [current, voltage, or resistance]"
+            print("Expected one of [current, voltage, or resistance]")
 
     # set the upper limit for how much current / voltage will be sourced
     def setCompliance(self, source, limit):
@@ -170,23 +170,23 @@ class Keithley2400(GpibInstrument):
         if source.lower() == 'current':
             self.write("SENS:CURR:PROT " + str(limit))
         else:
-            print "Expected one of [current, voltage]"
+            print("Expected one of [current, voltage]")
 
     # set resistance measurements to 4-wire
     def setFourWire(self):
         if self.ask("SENSE:FUNCTION?").split(",")[-1].strip('"') == 'RES':
             self.write("SYSTEM:RSENSE ON")
-            print 'Resistance measurement changed to 4-wire'
+            print('Resistance measurement changed to 4-wire')
         else:
-            print 'Must be measuring resistance'
+            print('Must be measuring resistance')
 
     # set resistance measurements to 2-wire
     def setTwoWire(self):
         if self.ask("SENSE:FUNCTION?").split(",")[-1].strip('"') == 'RES':
             self.write("SYSTEM:RSENSE OFF")
-            print 'Resistance measurement changed to 2-wire'
+            print('Resistance measurement changed to 2-wire')
         else:
-            print 'Must be measuring resistance'
+            print('Must be measuring resistance')
 
     # set triggering to use TLINK connections (for fastest linking of two Keithleys)
     def setTLINK(self, inputTrigs, outputTrigs):
@@ -267,13 +267,13 @@ class Keithley2400(GpibInstrument):
             self.saveCounter = 0
             while True:
                 self.saveCounter += 1
-                # print "checking file: " + filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".txt"
-                # print ""
+                # print("checking file: " + filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".txt")
+                # print("")
                 if not os.path.exists(filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".txt"):
                     break
             saveFile = open(filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".txt", "a+")
         else:
-            print "invalid mode"
+            print("invalid mode")
             return -1
 
         saveFile.write("\n")
@@ -289,12 +289,13 @@ class Keithley2400(GpibInstrument):
             saveFile.write(DEFAULT_ROW_FORMAT_DATA.format(*row))
             saveFile.write("\n")
         saveFile.close()
+	return saveFile.name
 
     def printSummary(self):
-        print "Measuring: " + self.getMeasure()
-        print "Sourcing: " + str(self.getSource())
-        print ""
-        print DEFAULT_ROW_FORMAT_HEADER.format("V (volts)", "I (amps)", "I/V (ohms)", "t (s)", "?")
+        print("Measuring: " + self.getMeasure())
+        print("Sourcing: " + str(self.getSource()))
+        print("")
+        print(DEFAULT_ROW_FORMAT_HEADER.format("V (volts)", "I (amps)", "I/V (ohms)", "t (s)", "?"))
         for row in chunks(self.dataAll, 5):
-            print DEFAULT_ROW_FORMAT_DATA.format(*row)
-        print ""
+            print(DEFAULT_ROW_FORMAT_DATA.format(*row))
+        print("")

@@ -4,17 +4,21 @@
 # >>> gs = gateSweep()
 # >>> gs.doSweep()
 
-DEFAULT_SAVE_PATH = '/users/henry/pythonData/'
-DEFAULT_SAVE_FILE = 'gateSweep.txt'
+DEFAULT_SAVE_PATH = 'C:/Data/'
+DEFAULT_SAVE_FILE = 'gateSweep_.txt'
 DEFAULT_ROW_FORMAT_HEADER = "{:^10}{:^10}{:^18}{:^18}"
 DEFAULT_ROW_FORMAT_DATA = "{:< 10.6f}{:> 10.3f}{:< 18.7e}{:< 18.7e}"
 
 DEFAULT_SD_KEITHLEY_GPIB = 23
-DEFAULT_GATE_KEITHLEY_GPIB = 22
+DEFAULT_GATE_KEITHLEY_GPIB = 24
 
 # for ramping output on and off
 DEFAULT_V_GATE_RAMP_STEP = 100E-3
-DEFAULT_V_SD_RAMP_STEP = 1E-4
+DEFAULT_SD_RAMP_STEP = 1E-4
+
+DEFAULT_SD_BIAS_TYPE = 'voltage'
+DEFAULT_SD_BIAS = 5E-3
+DEFAULT_SD_COMPLIANCE = 10E-6
 
 DEFAULT_SD_MAX_CURRENT = 10E-6
 DEFAULT_SD_DELAY = 0
@@ -23,9 +27,9 @@ DEFAULT_SD_NUM_POINTS = 1
 
 DEFAULT_GATE_MAX_CURRENT = 1E-6
 DEFAULT_GATE_DELAY = 0
-DEFAULT_V_GATE_SWEEP_START = -1.0
-DEFAULT_V_GATE_SWEEP_STOP = 1.5
-DEFAULT_V_GATE_SWEEP_STEP = 0.02
+DEFAULT_V_GATE_SWEEP_START = -10
+DEFAULT_V_GATE_SWEEP_STOP = 10
+DEFAULT_V_GATE_SWEEP_STEP = 0.2
 
 from keithley import Keithley2400
 import time
@@ -37,7 +41,7 @@ import matplotlib.pyplot as plt
 # convenience function for updating measurement parameters
 def updateIfNew(oldValue, message):
     newValue = raw_input(message + ' (' + str(oldValue) + '): ')
-    print newValue
+    print ''
     if newValue == '':
         return oldValue
     else:
@@ -55,19 +59,22 @@ class gateSweep(object):
         self.VgateStop = DEFAULT_V_GATE_SWEEP_STOP
         self.VgateStep = DEFAULT_V_GATE_SWEEP_STEP
 
-        self.sdMaxCurrent = DEFAULT_SD_MAX_CURRENT
+        self.sdBiasType = DEFAULT_SD_BIAS_TYPE
+        self.sdBias = DEFAULT_SD_BIAS
+        self.sdCompliance = DEFAULT_SD_COMPLIANCE
+
         self.sdDelay = DEFAULT_SD_DELAY
-        self.Vsd = DEFAULT_V_SD
         self.sdNumPoints = DEFAULT_SD_NUM_POINTS
 
         self.sdKeithley = Keithley2400(DEFAULT_SD_KEITHLEY_GPIB)
         self.gateKeithley = Keithley2400(DEFAULT_GATE_KEITHLEY_GPIB)
 
-        self.setup()
+        self.setup('y')
 
     # set up the gate sweep parameters
-    def setup(self):
-        changeParams = raw_input('Change parameters [y|n]? ')
+    def setup(self, changeParams=None):
+	if not changeParams:
+            changeParams = raw_input('Change parameters [y|N]? ')
         if changeParams == 'y':
             self.savePath = str(updateIfNew(self.savePath, 'Save path'))
             self.saveFile = str(updateIfNew(self.saveFile, 'Save filename'))
@@ -78,9 +85,11 @@ class gateSweep(object):
             self.VgateStop = float(updateIfNew(self.VgateStop, 'Gate sweep stopping point'))
             self.VgateStep = float(updateIfNew(self.VgateStep, 'Gate sweep step'))
 
-            self.sdMaxCurrent = float(updateIfNew(self.sdMaxCurrent, 'Limit for I_sd'))
+            self.sdBiasType = str(updateIfNew(self.sdBiasType, 'Type of bias ["voltage" or "current"]'))
+            self.sdBias = float(updateIfNew(self.sdBias, 'Source-drain bias (in V or A)'))
+            self.sdCompliance = float(updateIfNew(self.sdCompliance, 'Compliance (limit) value for source-drain \n(max current if sourcing voltage, max voltage if sourcing current)'))
+
             self.sdDelay = float(updateIfNew(self.sdDelay, 'Source-drain delay'))
-            self.Vsd = float(updateIfNew(self.Vsd, 'Source-drain voltage'))
             self.sdNumPoints = int(updateIfNew(self.sdNumPoints, 'Source-drain points to avg over'))
 
             sourceDrainGPIB = int(updateIfNew(DEFAULT_SD_KEITHLEY_GPIB, 'Source-drain Keithley GPIB address'))
@@ -95,6 +104,7 @@ class gateSweep(object):
         self._configureMeasurement()
 
     def _configureMeasurement(self):
+	# configure the gate keithley
         self.gateKeithley.setMeasure('current')
         self.gateKeithley.write("SOURCE:VOLT:RANGE " + str(self.VgateStop))
         self.gateKeithley.setSourceDC('voltage', 0)
@@ -102,10 +112,18 @@ class gateSweep(object):
         self.gateKeithley.setNumPoints(1)
         self.gateKeithley.setDelay(self.gateDelay)
 
-        self.sdKeithley.setMeasure('current')
-        self.sdKeithley.write("SOURCE:VOLT:RANGE " + str(self.Vsd))
-        self.sdKeithley.setSourceDC('voltage', 0)
-        self.sdKeithley.setCompliance('current', self.sdMaxCurrent)
+	# configure the source-drain keithley
+        if self.sdBiasType=='voltage':
+            self.sdKeithley.setMeasure('current')
+            self.sdKeithley.write("SOURCE:VOLT:RANGE " + str(self.sdBias))
+            self.sdKeithley.setSourceDC('voltage', 0)
+            self.sdKeithley.setCompliance('current', self.sdCompliance)
+        elif self.sdBiasType=='current':
+            self.sdKeithley.setMeasure('voltage')
+            self.sdKeithley.write("SOURCE:CURR:RANGE " + str(self.sdBias))
+            self.sdKeithley.setSourceDC('current', 0)
+            self.sdKeithley.setCompliance('voltage', self.sdCompliance)
+	    
         self.sdKeithley.setNumPoints(self.sdNumPoints)  # take 10 measurements at each point, average later
         self.sdKeithley.setDelay(self.sdDelay)
 
@@ -117,7 +135,7 @@ class gateSweep(object):
         self.gateKeithley._clearData()
 
         self.gateKeithley.rampOutputOn(self.VgateStart, DEFAULT_V_GATE_RAMP_STEP)
-        self.sdKeithley.rampOutputOn(self.Vsd, DEFAULT_V_SD_RAMP_STEP)
+        self.sdKeithley.rampOutputOn(self.sdBias, DEFAULT_SD_RAMP_STEP)
 
         # set up the Keithleys to use TLINK triggering
         # has to be after rampOutputOn apparently
@@ -149,7 +167,7 @@ class gateSweep(object):
         self.sdKeithley._pullData()
 
         # turn everything off
-        self.sdKeithley.rampOutputOff(self.Vsd, DEFAULT_V_SD_RAMP_STEP)
+        self.sdKeithley.rampOutputOff(self.sdBias, DEFAULT_SD_RAMP_STEP)
         self.gateKeithley.rampOutputOff(self.VgateStart, DEFAULT_V_GATE_RAMP_STEP)
         self.sdKeithley._stopMeasurement()
         self.gateKeithley._stopMeasurement()
@@ -173,7 +191,7 @@ class gateSweep(object):
         self.data = [[], [], [], []]  # time, V_gate, I_sd, I_gate
 
         self.Vgate = self.gateKeithley.rampOutputOn(self.VgateStart, DEFAULT_V_GATE_RAMP_STEP)
-        self.sdKeithley.rampOutputOn(self.Vsd, DEFAULT_V_SD_RAMP_STEP)
+        self.sdKeithley.rampOutputOn(self.sdBias, self.sdBias/20)#DEFAULT_SD_RAMP_STEP)
 
         startTime = time.time()
         # ramp up gate voltage while taking data
@@ -213,13 +231,13 @@ class gateSweep(object):
             self.Vgate -= self.VgateStep
             self.gateKeithley.setSourceDC('voltage', self.Vgate)
 
-        self.sdKeithley.rampOutputOff(self.Vsd, DEFAULT_V_SD_RAMP_STEP)
+        self.sdKeithley.rampOutputOff(self.sdBias, self.sdBias/20)#DEFAULT_SD_RAMP_STEP)
         self.gateKeithley.rampOutputOff(self.Vgate, DEFAULT_V_GATE_RAMP_STEP)
 
-        # self.sdKeithley.saveData(DEFAULT_SAVE_PATH, DEFAULT_SAVE_FILE, 'i')
-        print('V_gate sweep rate (V/s): ' + str(self.calcRate()))
-        self.saveData(self.savePath, self.saveFile)
-        self.savePlot(self.savePath, self.saveFile)
+	# self.sdKeithley.saveData(DEFAULT_SAVE_PATH, DEFAULT_SAVE_FILE, 'i')
+        # print('V_gate sweep rate (V/s): ' + str(self.calcRate()))
+        # self.saveData(self.savePath, self.saveFile)
+        # self.savePlot(self.savePath, self.saveFile)
 
     def calcRate(self):
         dataLen = len(self.data[0])
@@ -236,13 +254,13 @@ class gateSweep(object):
             self.saveCounter = 0
             while True:
                 self.saveCounter += 1
-                print "checking file: " + filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".txt"
+                print("checking file: " + filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".txt")
                 if not os.path.exists(filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".txt"):
                     break
-            print ""
+            print("")
             saveFile = open(filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".txt", "a+")
         else:
-            print "invalid mode"
+            print("invalid mode")
             return -1
 
         saveFile.write("\n")
@@ -267,13 +285,13 @@ class gateSweep(object):
             self.saveCounter = 0
             while True:
                 self.saveCounter += 1
-                print "checking file: " + filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".png"
+                print("checking file: " + filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".png")
                 if not os.path.exists(filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".png"):
                     break
-            print ""
+            print("")
             saveFileName = filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".png"
         else:
-            print "invalid mode"
+            print("invalid mode")
             return -1
 
         plt.plot(self.data[1], self.data[2], 'bs')
@@ -281,6 +299,7 @@ class gateSweep(object):
         plt.title("{:< 5.3f}".format(self.calcRate()) + " V/s")
         plt.ylabel('Current (A)')
         plt.xlabel('Gate voltage (V)')
+	plt.xlim([self.VgateStart, self.VgateStop])
         plt.savefig(saveFileName, bbox_inches='tight')
         plt.close()
 
@@ -290,4 +309,33 @@ class gateSweep(object):
         plt.title("{:< 5.3f}".format(self.calcRate()) + " V/s")
         plt.ylabel('Current (A)')
         plt.xlabel('Gate voltage (V)')
+	plt.xlim([self.VgateStart, self.VgateStop])
         plt.show()
+        plt.close()
+
+
+if __name__=="__main__":
+
+	gs = gateSweep()
+	option_dict = {
+			1: ['configure sweep', gs.setup], 
+			2: ['do sweep', gs.doSweep], 
+			3: ['plot data', gs.plotData], 
+			4: ['save data', gs.saveData], 
+			5: ['quit']
+			}
+
+	while True:
+		print '********************'
+		for key in option_dict:
+			print key, option_dict[key][0]
+		print ''
+
+		try:
+		    cmd = input('Enter an option [1-5]: ')
+		    option_dict[cmd][1]()
+	        except IndexError:
+		    break
+       	        except Exception as e:
+		    print e
+		    pass
