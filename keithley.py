@@ -1,4 +1,7 @@
 # requires pyvisa version 1.3, can be found at https://pypi.python.org/pypi/PyVISA/1.3
+# note that pip install pyvisa==1.3 will fail on windows,
+# must set the windows environment variable HOME=<the user's home directory>
+
 from visa import GpibInstrument
 from pyvisa.visa_exceptions import VisaIOError
 from math import sqrt, ceil
