@@ -1,6 +1,7 @@
 # requires pyvisa version 1.3, can be found at https://pypi.python.org/pypi/PyVISA/1.3
-# note that pip install pyvisa==1.3 will fail on windows,
-# must set the windows environment variable HOME=<the user's home directory>
+# or installed with pip install pyvisa==1.3
+
+# requires a National Instruments VISA driver, can be found at https://www.ni.com/visa/
 
 from visa import GpibInstrument
 from pyvisa.visa_exceptions import VisaIOError
