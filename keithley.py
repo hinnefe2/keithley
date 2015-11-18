@@ -8,8 +8,9 @@ from pyvisa.visa_exceptions import VisaIOError
 from math import sqrt, ceil
 import os.path
 import time
+import pandas as pd
 
-DEFAULT_TIME_STEP = 0.1  # in seconds
+DEFAULT_TIME_STEP = 0  # in seconds
 DEFAULT_NUM_POINTS = 1  # number of data points to collect for each measurement
 DEFAULT_ROW_FORMAT_HEADER = "{:^14}{:^14}{:^15}{:^10}{:^8}"
 DEFAULT_ROW_FORMAT_DATA = "{:< 14.6e}{:< 14.6e}{:< 15}{:<10.7}{:<8}"
@@ -19,6 +20,26 @@ DEFAULT_SAVE_PATH = "C://Data/pythonData/",
 # useful to break up dataAll
 def chunks(l, n):
     return [l[i:i + n] for i in range(0, len(l), n)]
+
+# utility for juypter notebook analysis, TODO: move to masonLab.utils
+def saveToFile(data, columns, fileName='test.txt', filePath='./'  ):
+    assert len(data) == len(columns), 'Must have same number of column names and data lists'
+
+    if len(data)>1:
+        df = pd.DataFrame(data).transpose()
+    else:
+        df = pd.DataFrame(data)
+    df.columns = columns
+    
+    saveCounter = 0
+    while True:
+        saveCounter += 1
+        if not os.path.exists(filePath + fileName[:-4] + "{:04d}".format(saveCounter) + ".txt"):
+            break
+    saveFile = filePath + fileName[:-4] + "{:04d}".format(saveCounter) + ".txt"
+
+    df.to_csv(saveFile, index=False)
+
 
 
 class Keithley2400(GpibInstrument):
@@ -41,15 +62,17 @@ class Keithley2400(GpibInstrument):
     # do setup stuff I don't really understand
     # adapted from http://pyvisa.sourceforge.net/pyvisa.html#a-more-complex-example
     def _initialize(self):
+	self.write("*RST")
         self.write("*CLS")
         self.write("STATUS:MEASUREMENT:ENABLE 512")
         self.write("*SRE 1")
         self.write("ARM:COUNT 1")
         self.write("ARM:SOURCE BUS")
         self.write("TRACE:FEED SENSE1")
+	self.write("SYSTEM:TIME:RESET:AUTO 0")
 
         # set various things to default values
-        self.setDelay()
+        #self.setDelay()
         self.setNumPoints()
 
     # clear the saved data from previous measurement
@@ -59,6 +82,7 @@ class Keithley2400(GpibInstrument):
         self.dataCurr = []
         self.dataRes = []
         self.dataTime = []
+        self.data = {}
 
     # start a measurement and wait for the 'measurement is done' signal from the Keithley
     def _startMeasurement(self):
@@ -90,8 +114,9 @@ class Keithley2400(GpibInstrument):
         self.dataCurr += self.dataTemp[1::5]
         self.dataRes += self.dataTemp[2::5]
         self.dataTime += self.dataTemp[3::5]
+        self.data = {'volts':self.dataVolt, 'amps':self.dataCurr, 'ohms':self.dataRes}
 
-        # self.write("TRACE:CLEAR")
+	return self.dataTemp
 
     # stop a measurement, turn output off
     def _stopMeasurement(self):
@@ -113,9 +138,9 @@ class Keithley2400(GpibInstrument):
         self.write("TRIGGER:DELAY %f" % delay)
 
     # set DC source, expects source to be either "voltage" or "current"
-    def setSourceDC(self, source, value):
-        # if (self.getMeasure()=='RES'):
-        #   self.write("SENSE:RESISTANCE:MODE MANUAL")
+    def setSourceDC(self, source, value=0):
+        if (self.getMeasure()=='RES'):
+            self.write("SENSE:RESISTANCE:MODE MANUAL")
         if source.lower() == "voltage":
             self.write("SOURCE:FUNCTION:MODE VOLTAGE")
             self.write("SOURCE:VOLTAGE:MODE FIXED")
@@ -223,6 +248,22 @@ class Keithley2400(GpibInstrument):
     # Operation methods: use these to operate the Keithley #
     ########################################################
 
+    # turn the output on
+    def outputOn(self):
+	self.write("OUTPUT ON")
+
+    # turn the output off
+    def outputOff(self):
+	self.write("OUTPUT OFF")
+
+    # read a single data point
+    def measurePoint(self):
+        self.write("TRACE:FEED:CONTROL NEXT")
+        self.write("INIT")
+        self.trigger()
+        return self._pullData()
+	
+
     # perform a measurement w/ current parameters
     def doMeasurement(self):
         self._clearData()
@@ -256,7 +297,7 @@ class Keithley2400(GpibInstrument):
     def rampOutputOff(self, rampStart, step, timeStep=50E-3):
         rampTarget = 0
         sourceValue = self.rampOutput(rampStart, rampTarget, step, timeStep)
-        self.write("OUTPUT OFF")
+        self.outputOff()
         return sourceValue
 
     # save the collected data to file
