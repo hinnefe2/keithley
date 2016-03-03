@@ -1,346 +1,441 @@
-# requires pyvisa version 1.3, can be found at https://pypi.python.org/pypi/PyVISA/1.3
-# or installed with pip install pyvisa==1.3
+"""Module containing classes to interface with Keithley brand instruments
 
-# requires a National Instruments VISA driver, can be found at https://www.ni.com/visa/
+This module requires a National Instruments VISA driver, which can be found at
+https://www.ni.com/visa/
 
-from visa import GpibInstrument
-from pyvisa.visa_exceptions import VisaIOError
-from math import sqrt, ceil
+Attributes:
+    resource_manager: the pyvisa resource manager which provides the visa
+                      objects used for communicating over the GPIB interface
+
+    logger: a python logger object
+
+
+Classes:
+    Keithley2400: a class for interfacing with a Keithley2400 SMU
+
+"""
+
+from math import ceil
 import os.path
 import time
+import logging
+import visa
 import pandas as pd
+from numpy import linspace
 
-DEFAULT_TIME_STEP = 0  # in seconds
 DEFAULT_NUM_POINTS = 1  # number of data points to collect for each measurement
-DEFAULT_ROW_FORMAT_HEADER = "{:^14}{:^14}{:^15}{:^10}{:^8}"
-DEFAULT_ROW_FORMAT_DATA = "{:< 14.6e}{:< 14.6e}{:< 15}{:<10.7}{:<8}"
 DEFAULT_SAVE_PATH = "C://Data/pythonData/",
 
+# create a logger object for this module
+logger = logging.getLogger(__name__)
 
-# useful to break up dataAll
-def chunks(l, n):
-    return [l[i:i + n] for i in range(0, len(l), n)]
-
-# utility for juypter notebook analysis, TODO: move to masonLab.utils
-def saveToFile(data, columns, fileName='test.txt', filePath='./'  ):
-    assert len(data) == len(columns), 'Must have same number of column names and data lists'
-
-    if len(data)>1:
-        df = pd.DataFrame(data).transpose()
-    else:
-        df = pd.DataFrame(data)
-    df.columns = columns
-    
-    saveCounter = 0
-    while True:
-        saveCounter += 1
-        if not os.path.exists(filePath + fileName[:-4] + "{:04d}".format(saveCounter) + ".txt"):
-            break
-    saveFile = filePath + fileName[:-4] + "{:04d}".format(saveCounter) + ".txt"
-
-    df.to_csv(saveFile, index=False)
+try:
+    # the pyvisa manager we'll use to connect to the GPIB resources
+    resource_manager = visa.ResourceManager()
+except OSError:
+    logger.exception("\n\tCould not find the VISA library. Is the National Instruments VISA driver installed?\n\n")
 
 
+class Keithley2400():
+    """A class to interface with the Keithley 2400 sourcemeter
 
-class Keithley2400(GpibInstrument):
-    """A class to interface with the Keithley 2400 sourcemeter"""
+    Args:
+        GPIBaddr: the GPIB address of the instrument
+
+    Attributes:
+        data: a pandas dataframe containing data recorded by the instrument
+
+    Methods:
+        setMeasure
+            Set what to measure (current, voltage, or resistance).
+        setSourceDC
+            Set the type (voltage or current) and level of a DC output.
+        setSourceSweep
+            Set the type and parameters of an output sweep
+        setCompliance
+            Set the type and level of the output compliance limit.
+
+        getMeasure
+            Get what type of input is currently being measured.
+        getSource
+            Get the currently configured type and level of the output.
+        getCompliance
+            Get the type and level of the output compliance limit.
+        getConfig
+            Get a string summarizing the current instrument configuration.
+
+        readPoint
+            Perform a single measurement with the current configuration, read the result, and store it in self.data.
+        readTrace
+            Perform a sweep measurement with the current configuration, read the results, and store them in self.data.
+        outputOn
+            Turn the instrument's output on, at the currently configured source value.
+        outputOff
+            Turn the instrument's output off.
+
+    """
 
     def __init__(self, GPIBaddr):
+        """Create an instance of the Keithley2400 class
+
+        Arguments:
+            GPIBaddr -- The GPIB address of the instrument.
+        """
         try:
-            # call the visa.GpibInstrument init method w/ appropriate argument
-            super(Keithley2400, self).__init__("GPIB::%d" % GPIBaddr)
+            self._visa_resource = resource_manager.open_resource("GPIB::%d" % GPIBaddr)
             self._initialize()
             self._clearData()
-            self.saveCounter = 0
-        except VisaIOError:
-            print('VisaIOError - is the keithley turned on?')
+
+            self.data = pd.DataFrame()
+
+        except NameError:
+            error_msg = "\n\tCannot instantiate Keithley2400 instance. Is the National Instruments VISA library installed?\n\n"
+            logger.exception(error_msg)
+            raise NameError
+
+        except Exception:
+            error_msg = ""
+            logger.exception(error_msg)
 
     #####################################################################################################
     # Internal methods: these are used internally but shouldn't be necessary for basic use of the class #
     #####################################################################################################
 
-    # do setup stuff I don't really understand
     # adapted from http://pyvisa.sourceforge.net/pyvisa.html#a-more-complex-example
     def _initialize(self):
-	self.write("*RST")
-        self.write("*CLS")
-        self.write("STATUS:MEASUREMENT:ENABLE 512")
-        self.write("*SRE 1")
-        self.write("ARM:COUNT 1")
-        self.write("ARM:SOURCE BUS")
-        self.write("TRACE:FEED SENSE1")
-	self.write("SYSTEM:TIME:RESET:AUTO 0")
+        """Initialize the instrument to its default configuration."""
 
-        # set various things to default values
-        #self.setDelay()
-        self.setNumPoints()
+        self._visa_resource.write("*RST")
+        self._visa_resource.write("*CLS")
+        self._visa_resource.write("STATUS:MEASUREMENT:ENABLE 512")
+        self._visa_resource.write("*SRE 1")
+        self._visa_resource.write("ARM:COUNT 1")
+        self._visa_resource.write("ARM:SOURCE BUS")
+        self._visa_resource.write("TRACE:FEED SENSE1")
+        self._visa_resource.write("SYSTEM:TIME:RESET:AUTO 0")
 
-    # clear the saved data from previous measurement
     def _clearData(self):
-        self.dataAll = []
-        self.dataVolt = []
-        self.dataCurr = []
-        self.dataRes = []
-        self.dataTime = []
-        self.data = {}
+        """Clear the saved data from the previous measurement."""
 
-    # start a measurement and wait for the 'measurement is done' signal from the Keithley
+        self._visa_resource.write("TRACE:CLEAR")
+        self.data = pd.DataFrame()
+
+    def _startNoWait(self):
+        """Turn the output on, trigger a measurement, and proceed without waiting for the
+        'measurement is done' signal from the instrument.
+        """
+
+        self._visa_resource.write("OUTPUT ON")
+        self._visa_resource.write("TRACE:FEED:CONTROL NEXT")
+        self._visa_resource.write("INIT")
+        self._visa_resource.trigger()
+
+    def _catchSRQ(self):
+        """Wait for the 'measurement is done' signal from the instrument."""
+
+        self._visa_resource.wait_for_srq(None)
+        self._visa_resource.query("STATUS:MEASUREMENT?")
+
     def _startMeasurement(self):
+        """Start a measurement and wait for the 'measurement is done' signal from the instrument."""
+
         self._startNoWait()
         self._catchSRQ()
 
-    # start a measurement
-    def _startNoWait(self):
-        self.write("OUTPUT ON")
-        self.write("TRACE:FEED:CONTROL NEXT")
-        self.write("INIT")
-        self.trigger()
-
-    # catch the 'measurement is done' signal from the Keithely
-    def _catchSRQ(self):
-        self.wait_for_srq(None)
-        self.ask("STATUS:MEASUREMENT?")
-
-    # pull data from the Keithley
-    # always call this before _stopMeasurement() bc _stopMeasurement clears the keithley's buffer
     def _pullData(self):
-        # returns (V, I, I/V, time, ?) for each data point
-        # (at least when measuring resistance)
-        # when not measuring resistance, I/V column = 9.91e37
-        self.dataTemp = self.ask_for_values("TRACE:DATA?")
+        """Retrieve data from the instrument's internal buffer and store it in self.data."""
 
-        self.dataAll += self.dataTemp
-        self.dataVolt += self.dataTemp[0::5]
-        self.dataCurr += self.dataTemp[1::5]
-        self.dataRes += self.dataTemp[2::5]
-        self.dataTime += self.dataTemp[3::5]
-        self.data = {'volts':self.dataVolt, 'amps':self.dataCurr, 'ohms':self.dataRes}
+        # returns (V, I, I/V, time, ?) for each data point in a flat list
+        # I/V column is only meaningful if the instrument was configured to measure resistance
+        dataList = self._visa_resource.query_values("TRACE:DATA?")
+        dataDict = {'volts': dataList[0::5],
+                    'amps': dataList[1::5],
+                    'ohms': dataList[2::5],
+                    'seconds': dataList[3::5]}
+        dataDF = pd.DataFrame(dataDict)
 
-	return self.dataTemp
+        self.data = self.data.append(dataDF)
 
-    # stop a measurement, turn output off
     def _stopMeasurement(self):
-        self.write("OUTPUT OFF")
-        self.write("TRACE:CLEAR")
-        self.ask("STATUS:MEASUREMENT?")
+        """Turn the output off, clear the instrument's internal buffer, and reset status bytes
+        to prepare for a new measurement."""
+
+        self._visa_resource.write("OUTPUT OFF")
+        self._visa_resource.write("TRACE:CLEAR")
+        self._visa_resource.query("STATUS:MEASUREMENT?")
+
+    def _rampOutput(self, rampStart, rampTarget, nSteps=20, timeStep=50E-3):
+        """Ramp the output smoothly from one value to another.
+
+        Arguments:
+            rampStart  -- The starting value for the output ramp, in volts or amps.
+            rampTarget -- The ending value for the output ramp, in volts or amps.
+           [nSteps]    -- Optional. The number of steps in the ramp.
+           [timeStep]  -- Optional. The time in seconds between each step in the ramp.
+
+        Returns:
+            sourceValue -- The output value currently being sourced as a result of the ramp.
+        """
+
+        source = self.getSource()[0]  # either 'voltage' or 'current'
+
+        for sourceValue in linspace(rampStart, rampTarget, nSteps):
+            self.setSourceDC(source, sourceValue)
+            time.sleep(timeStep)
+
+        return sourceValue
 
     ##############################################################
-    # Configuration methods: use these to configure the Keithley #
+    # Configuration methods: use these to configure the instrument #
     ##############################################################
 
-    # set the number of data points to take
-    def setNumPoints(self, numPts=DEFAULT_NUM_POINTS):
-        self.write("TRIGGER:COUNT %d" % numPts)
-        self.write("TRACE:POINTS %d" % numPts)
-
-    # set the delay between data points (in sec)
-    def setDelay(self, delay=DEFAULT_TIME_STEP):
-        self.write("TRIGGER:DELAY %f" % delay)
-
-    # set DC source, expects source to be either "voltage" or "current"
     def setSourceDC(self, source, value=0):
-        if (self.getMeasure()=='RES'):
-            self.write("SENSE:RESISTANCE:MODE MANUAL")
-        if source.lower() == "voltage":
-            self.write("SOURCE:FUNCTION:MODE VOLTAGE")
-            self.write("SOURCE:VOLTAGE:MODE FIXED")
-            self.write("SOURCE:VOLTAGE:RANGE " + str(value))
-            self.write("SOURCE:VOLTAGE:LEVEL " + str(value))
-        elif source.lower() == "current":
-            self.write("SOURCE:FUNCTION:MODE CURRENT")
-            self.write("SOURCE:CURRENT:MODE FIXED")
-            self.write("SOURCE:CURRENT:RANGE " + str(value))
-            self.write("SOURCE:CURRENT:LEVEL " + str(value))
+        """Configure the instrument to provide a constant output.
 
-    # set sweep source, expects source to be either "voltage" or "current"
-    def setSourceSweep(self, source, startValue, stopValue, sourceStep, timeStep=DEFAULT_TIME_STEP):
-        numPts = ceil(abs((stopValue - startValue) / sourceStep)) + 1
+        Arguments:
+            source -- The type of output to source. One of ['voltage' | 'current'].
+            value  -- The output value to source, in volts or amps.
+        """
         if self.getMeasure() == 'RES':
-            self.write("SENSE:RESISTANCE:MODE MANUAL")
+            self._visa_resource.write("SENSE:RESISTANCE:MODE MANUAL")
+
         if source.lower() == "voltage":
-            self.write("SOURCE:FUNCTION:MODE VOLTAGE")
-            self.write("SOURCE:VOLTAGE:MODE SWEEP")
-            # self.write("SOURCE:VOLTAGE:RANGE " + str(stopValue))
-            self.write("SOURCE:VOLTAGE:START " + str(startValue))
-            self.write("SOURCE:VOLTAGE:STOP " + str(stopValue))
-            self.write("SOURCE:VOLTAGE:STEP " + str(sourceStep))
-            self.setNumPoints(numPts)
-            self.setDelay(timeStep)
+            self._visa_resource.write("SOURCE:FUNCTION:MODE VOLTAGE")
+            self._visa_resource.write("SOURCE:VOLTAGE:MODE FIXED")
+            self._visa_resource.write("SOURCE:VOLTAGE:RANGE " + str(value))
+            self._visa_resource.write("SOURCE:VOLTAGE:LEVEL " + str(value))
         elif source.lower() == "current":
-            self.write("SOURCE:FUNCTION:MODE CURRENT")
-            self.write("SOURCE:CURRENT:MODE SWEEP")
-            self.write("SOURCE:CURRENT:RANGE " + str(stopValue))
-            self.write("SOURCE:CURRENT:START " + str(startValue))
-            self.write("SOURCE:CURRENT:STOP " + str(stopValue))
-            self.write("SOURCE:CURRENT:STEP " + str(sourceStep))
-            self.setNumPoints(numPts)
-            self.setDelay(timeStep)
+            self._visa_resource.write("SOURCE:FUNCTION:MODE CURRENT")
+            self._visa_resource.write("SOURCE:CURRENT:MODE FIXED")
+            self._visa_resource.write("SOURCE:CURRENT:RANGE " + str(value))
+            self._visa_resource.write("SOURCE:CURRENT:LEVEL " + str(value))
         else:
-            print("Error: bad arguments")
+            logger.error("Source not set. Expected one of ['voltage' | 'current'].")
+
+    def setSourceSweep(self, source, startValue, stopValue, sourceStep):
+        """Configure the instrument to perform a sweep measurement.
+
+        Arguments:
+            source     -- The type of output to source. One of ['voltage' | 'current'].
+            startValue -- The output value to start the sweep at, in volts or amps.
+            stopValue  -- The output value to stop the sweep at, in volts or amps.
+            sourceStep -- The value by which to step the output, in volts or amps.
+
+        Returns:
+            numPts     -- The number of data points to be collected.
+        """
+
+        # configure the instrument to record the appropriate number of points
+        numPts = ceil(abs((stopValue - startValue) / sourceStep)) + 1
+        self._visa_resource.write("TRIGGER:COUNT %d" % numPts)
+        self._visa_resource.write("TRACE:POINTS %d" % numPts)
+
+        if self.getMeasure() == 'RES':
+            self._visa_resource.write("SENSE:RESISTANCE:MODE MANUAL")
+
+        if source.lower() == "voltage":
+            self._visa_resource.write("SOURCE:FUNCTION:MODE VOLTAGE")
+            self._visa_resource.write("SOURCE:VOLTAGE:MODE SWEEP")
+            self._visa_resource.write("SOURCE:VOLTAGE:RANGE " + str(stopValue))
+            self._visa_resource.write("SOURCE:VOLTAGE:START " + str(startValue))
+            self._visa_resource.write("SOURCE:VOLTAGE:STOP " + str(stopValue))
+            self._visa_resource.write("SOURCE:VOLTAGE:STEP " + str(sourceStep))
+        elif source.lower() == "current":
+            self._visa_resource.write("SOURCE:FUNCTION:MODE CURRENT")
+            self._visa_resource.write("SOURCE:CURRENT:MODE SWEEP")
+            self._visa_resource.write("SOURCE:CURRENT:RANGE " + str(stopValue))
+            self._visa_resource.write("SOURCE:CURRENT:START " + str(startValue))
+            self._visa_resource.write("SOURCE:CURRENT:STOP " + str(stopValue))
+            self._visa_resource.write("SOURCE:CURRENT:STEP " + str(sourceStep))
+        else:
+            logger.error("Sweep not configured. Expected source to be one of ['voltage' | 'current'].")
+
         return numPts
 
-    # set what is being measured (VOLTage or CURRent or RESistance)
-    def setMeasure(self, measure):
-        self.write("SENSE:FUNCTION:OFF 'CURR:DC', 'VOLT:DC', 'RES'")
+    def setMeasure(self, measure, senseMode=0):
+        """Specify what the instrument should measure.
+
+        Arguments:
+            measure     -- What to measure. One of ['voltage' | 'current' | 'resistance'].
+           [senseMode]  -- Optional. If measuring resistance, set to 0 for two-wire, 1 for four-wire measurements.
+        """
+
+        self._visa_resource.write("SENSE:FUNCTION:OFF 'CURR:DC', 'VOLT:DC', 'RES'")
+
         if measure.lower() == "voltage":
-            self.write("SENSE:FUNCTION:ON 'VOLTAGE:DC'")
+            self._visa_resource.write("SENSE:FUNCTION:ON 'VOLTAGE:DC'")
         elif measure.lower() == "current":
-            self.write("SENSE:FUNCTION:ON 'CURRENT:DC'")
+            self._visa_resource.write("SENSE:FUNCTION:ON 'CURRENT:DC'")
         elif measure.lower() == "resistance":
-            self.write("SENSE:FUNCTION:ON 'CURRENT:DC'")
-            self.write("SENSE:FUNCTION:ON 'RESISTANCE'")
-        else:
-            print("Expected one of [current, voltage, or resistance]")
+            self._visa_resource.write("SENSE:FUNCTION:ON 'CURRENT:DC'")
+            self._visa_resource.write("SENSE:FUNCTION:ON 'RESISTANCE'")
 
-    # set the upper limit for how much current / voltage will be sourced
+            # configure the instrument to use two- or four-wire sense mode
+            if senseMode == 0:
+                self._visa_resource.write("SYSTEM:RSENSE OFF")
+            elif senseMode == 1:
+                self._visa_resource.write("SYSTEM:RSENSE ON")
+
+        else:
+            logger.error("Measurement type not set. Expected one of ['voltage' | 'current' | 'resistance']")
+
     def setCompliance(self, source, limit):
+        """Specify the compliance limit for whatever the instrument is sourcing.
+
+        Arguments:
+            source -- The type of output the instrument is sourcing. One of ['voltage' | 'current'].
+            limit  -- The compliance limit, in volts or amps.
+        """
+
         if source.lower() == 'voltage':
-            self.write("SENS:VOLT:PROT " + str(limit))
+            self._visa_resource.write("SENS:VOLT:PROT " + str(limit))
         if source.lower() == 'current':
-            self.write("SENS:CURR:PROT " + str(limit))
+            self._visa_resource.write("SENS:CURR:PROT " + str(limit))
         else:
-            print("Expected one of [current, voltage]")
+            logger.error("Compliance limit not set. Expected one of ['voltage' | 'current']")
 
-    # set resistance measurements to 4-wire
-    def setFourWire(self):
-        if self.ask("SENSE:FUNCTION?").split(",")[-1].strip('"') == 'RES':
-            self.write("SYSTEM:RSENSE ON")
-            print('Resistance measurement changed to 4-wire')
-        else:
-            print('Must be measuring resistance')
-
-    # set resistance measurements to 2-wire
-    def setTwoWire(self):
-        if self.ask("SENSE:FUNCTION?").split(",")[-1].strip('"') == 'RES':
-            self.write("SYSTEM:RSENSE OFF")
-            print('Resistance measurement changed to 2-wire')
-        else:
-            print('Must be measuring resistance')
-
-    # set triggering to use TLINK connections (for fastest linking of two Keithleys)
-    def setTLINK(self, inputTrigs, outputTrigs):
-        self.write("TRIG:SOURCE TLINK")
-        self.write("TRIG:INPUT {}".format(inputTrigs))
-        self.write("TRIG:OUTPUT {}".format(outputTrigs))
-
-    # set triggering to be immediate (default for single Keithley measurements)
-    def setNoTLINK(self):
-        self.write("TRIG:SOURCE IMMEDIATE")
-        self.write("TRIG:INPUT NONE")
-        self.write("TRIG:OUTPUT NONE")
-
-    # get what is being measured (VOLTage or CURRent or RESistance)
     def getMeasure(self):
-        # keithley returns something like ' "VOLT:DC", "RES" ' or ' "CURR:DC" '
-        return self.ask("SENSE:FUNCTION?").split(",")[-1].strip('"')
+        """Get what the instrument is currently configured to measure.
 
-    # get what is being sourced (VOLTage or CURRent)
-    # returns ['VOLTAGE'|'CURRENT', value in volts|amps]
+        Returns:
+            measuring -- One of ['voltage' | 'current' | 'resistance']
+        """
+
+        # instrument returns one of "VOLT:DC", "RES" or "CURR:DC"
+        conversion_dict = {'VOLT:DC': 'voltage', 'CURR:DC': 'current', 'RES': 'resistance'}
+        query_result = self._visa_resource.query("SENSE:FUNCTION?").split(",")[-1].strip('"')
+        measuring = conversion_dict[query_result]
+
+        return measuring
+
     def getSource(self):
-        source = self.ask("SOURCE:FUNCTION:MODE?")
+        """Get the type and level of output the instrument is currently configured to source.
+
+        Returns:
+            (source, value) -- source: one of ['voltage' | 'current'].
+                               value:  the level of the output, in volts or amps.
+        """
+
+        source = self._visa_resource.query("SOURCE:FUNCTION:MODE?")
+
         if source == "VOLT":
-            # sourceMode = self.ask("SOURCE:VOLTAGE:MODE?")
-            return ['VOLTAGE', self.ask_for_values("SOURCE:VOLTAGE:LEVEL?")[0]]
+            return ('voltage', self._visa_resource.query_values("SOURCE:VOLTAGE:LEVEL?")[0])
         elif source == "CURR":
-            return ['CURRENT', self.ask_for_values("SOURCE:CURRENT:LEVEL?")[0]]
+            return ('current', self._visa_resource.query_values("SOURCE:CURRENT:LEVEL?")[0])
 
+    def getCompliance(self):
+        """Get the type and level of the currently configured compliance limit.
+
+        Returns:
+            (source, value) -- source: one of ['voltage' | 'current'].
+                               value:  the level of the compliance limit, in volts or amps.
+        """
     ########################################################
-    # Operation methods: use these to operate the Keithley #
+    # Operation methods: use these to operate the instrument #
     ########################################################
 
-    # turn the output on
     def outputOn(self):
-	self.write("OUTPUT ON")
+        """Turn the output on."""
 
-    # turn the output off
+        self._visa_resource.write("OUTPUT ON")
+
     def outputOff(self):
-	self.write("OUTPUT OFF")
+        """Turn the output off."""
 
-    # read a single data point
-    def measurePoint(self):
-        self.write("TRACE:FEED:CONTROL NEXT")
-        self.write("INIT")
-        self.trigger()
-        return self._pullData()
-	
+        self._visa_resource.write("OUTPUT OFF")
+
+    def readPoint(self):
+        """Perform a single measurement with the current configuration, read the result, and store it in self.data."""
+
+        self._visa_resource.write("TRACE:FEED:CONTROL NEXT")
+        self._visa_resource.write("INIT")
+        self._visa_resource.trigger()
+        self._catchSRQ()
+        self._pullData()
 
     # perform a measurement w/ current parameters
-    def doMeasurement(self):
+    def readTrace(self):
         self._clearData()
         self._startMeasurement()
         self._pullData()
         self._stopMeasurement()
 
-    # ramp the output from rampStart to rampTarget
-    def rampOutput(self, rampStart, rampTarget, step, timeStep=50E-3):
-        if rampTarget < rampStart: step = -abs(step)
-        if rampTarget > rampStart: step = abs(step)
-
-        source = self.getSource()[0]  # either 'voltage' or 'current'
-        sourceValue = rampStart
-        self.setSourceDC(source, sourceValue)
-        self.write("OUTPUT ON")
-        # hack-y : while (current level + step) is closer to target than current level
-        while abs((sourceValue + step) - rampTarget) <= abs(sourceValue - rampTarget):
-            sourceValue += step
-            self.setSourceDC(source, sourceValue)
-            time.sleep(timeStep)
-        return sourceValue
-
     # starting with the output off, turn the output on then ramp the output up/down to a specified level
     def rampOutputOn(self, rampTarget, step, timeStep=50E-3):
         rampStart = 0
-        sourceValue = self.rampOutput(rampStart, rampTarget, step, timeStep)
+        sourceValue = self._rampOutput(rampStart, rampTarget, step, timeStep)
         return sourceValue
 
     # starting with the output on, ramp the output to 0, then turn the output off
     def rampOutputOff(self, rampStart, step, timeStep=50E-3):
         rampTarget = 0
-        sourceValue = self.rampOutput(rampStart, rampTarget, step, timeStep)
+        sourceValue = self._rampOutput(rampStart, rampTarget, step, timeStep)
         self.outputOff()
         return sourceValue
 
     # save the collected data to file
     # mode 'a' appends to existing file, mode 'i' increments file counter ie test0001.txt, test0002,txt
-    def saveData(self, filePath=DEFAULT_SAVE_PATH, fileName="test.txt", mode='i'):
-        if filePath[-1] != '/': filePath += '/'
-        if fileName[-4:] != '.txt': fileName += '.txt'
+    def saveData(self, filePath, fileName="test.csv", mode='i'):
+        """Save the collected data to file in csv format.
 
+        Arguments:
+            filePath --
+            fileName --
+           [mode]    -- Optional.
+        """
+
+        # make sure the filePath has a trailing slash
+        if filePath[-1] != '/':
+            filePath += '/'
+
+        # make sure the fileName ends with .csv
+        if fileName[-4:] != '.csv':
+            fileName += '.csv'
+
+        # append to existing files
         if mode == 'a':
-            saveFile = open(filePath + fileName, "a+")
-        elif mode == "i":
-            self.saveCounter = 0
-            while True:
-                self.saveCounter += 1
-                # print("checking file: " + filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".txt")
-                # print("")
-                if not os.path.exists(filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".txt"):
-                    break
-            saveFile = open(filePath + fileName[:-4] + "{:04d}".format(self.saveCounter) + ".txt", "a+")
+            filePathAndName = os.path.join(filePath, fileName)
+            self.data.to_csv(filePathAndName, index=False, mode='a+')
+        # create new files with incrementing filenames, e.g. filename0001.csv
         else:
-            print("invalid mode")
-            return -1
+            saveCounter = 0
+            while True:
+                saveCounter += 1
 
-        saveFile.write("\n")
-        # single line format
-        # saveFile.write(DEFAULT_ROW_FORMAT_HEADER.format("V (volts)","I (amps)","I/V (ohms)","t (s)","?"))
+                incrementalFileName = fileName.rstrip('.csv') + "{:04d}".format(saveCounter) + ".csv"
+                filePathAndName = os.path.join(filePath, incrementalFileName)
 
-        # format for importing to Origin
-        saveFile.write(DEFAULT_ROW_FORMAT_HEADER.format("V", "I", "I/V", "t", "?"))
-        saveFile.write("\n")
-        saveFile.write(DEFAULT_ROW_FORMAT_HEADER.format("volts", "amps", "ohms", "s", "?"))
-        saveFile.write("\n")
-        for row in chunks(self.dataAll, 5):
-            saveFile.write(DEFAULT_ROW_FORMAT_DATA.format(*row))
-            saveFile.write("\n")
-        saveFile.close()
-	return saveFile.name
+                if not os.path.exists(filePathAndName):
+                    break
+            self.data.to_csv(filePathAndName, index=False, mode='w')
 
-    def printSummary(self):
-        print("Measuring: " + self.getMeasure())
-        print("Sourcing: " + str(self.getSource()))
-        print("")
-        print(DEFAULT_ROW_FORMAT_HEADER.format("V (volts)", "I (amps)", "I/V (ohms)", "t (s)", "?"))
-        for row in chunks(self.dataAll, 5):
-            print(DEFAULT_ROW_FORMAT_DATA.format(*row))
-        print("")
+    def getConfig(self):
+        """Get a string summarizing the current instrument configuration.
+
+        Returns:
+            config_str -- A string describing the current instrument configuration.
+        """
+
+        configDict = {'Measuring: ': self.getMeasure(),
+                      'Sourcing: ': self.getSource(),
+                      'Compliance: ': self.getCompliance()}
+
+        return ' - '.join(configDict.items())
+
+    #####################################################################################################
+    # Deprecated methods
+    #####################################################################################################
+
+    def _setTLINK(self, inputTrigs, outputTrigs):
+        """Set the instrument to use TLINK triggering."""
+        self._visa_resource.write("TRIG:SOURCE TLINK")
+        self._visa_resource.write("TRIG:INPUT {}".format(inputTrigs))
+        self._visa_resource.write("TRIG:OUTPUT {}".format(outputTrigs))
+        raise DeprecationWarning
+
+    def _setNoTLINK(self):
+        """Set the instrument to use immediate triggering."""
+        self._visa_resource.write("TRIG:SOURCE IMMEDIATE")
+        self._visa_resource.write("TRIG:INPUT NONE")
+        self._visa_resource.write("TRIG:OUTPUT NONE")
+        raise DeprecationWarning
