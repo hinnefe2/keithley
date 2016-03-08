@@ -19,15 +19,18 @@ from math import ceil
 import os.path
 import time
 import logging
-import visa
 import pandas as pd
 from numpy import linspace
+import visa
+from pyvisa.errors import VisaIOError
 
 DEFAULT_NUM_POINTS = 1  # number of data points to collect for each measurement
 DEFAULT_SAVE_PATH = "C://Data/pythonData/",
 
 # create a logger object for this module
 logger = logging.getLogger(__name__)
+# added so that log messages show up in Jupyter notebooks
+logger.addHandler(logging.StreamHandler())
 
 try:
     # the pyvisa manager we'll use to connect to the GPIB resources
@@ -87,15 +90,21 @@ class Keithley2400():
             self._clearData()
 
             self.data = pd.DataFrame()
+      
+            assert len(self._visa_resource.query("*IDN?")) > 0 , 'Instrument identification failed.'
 
         except NameError:
             error_msg = "\n\tCannot instantiate Keithley2400 instance. Is the National Instruments VISA library installed?\n\n"
             logger.exception(error_msg)
             raise NameError
 
-        except Exception:
-            error_msg = ""
+        except VisaIOError:
+            error_msg = "\n\tError communicating with the instrument. The Keithley should be in GPIB communication mode, is it in RS-232?\n\n"
             logger.exception(error_msg)
+
+        #except Exception:
+         #   error_msg = ""
+          #  logger.exception(error_msg)
 
     #####################################################################################################
     # Internal methods: these are used internally but shouldn't be necessary for basic use of the class #
