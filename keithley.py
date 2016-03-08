@@ -140,7 +140,7 @@ class Keithley2400():
         self._visa_resource.write("OUTPUT ON")
         self._visa_resource.write("TRACE:FEED:CONTROL NEXT")
         self._visa_resource.write("INIT")
-        self._visa_resource.trigger()
+        self._visa_resource.assert_trigger()
 
     def _catchSRQ(self):
         """Wait for the 'measurement is done' signal from the instrument."""
@@ -159,7 +159,7 @@ class Keithley2400():
 
         # returns (V, I, I/V, time, ?) for each data point in a flat list
         # I/V column is only meaningful if the instrument was configured to measure resistance
-        dataList = self._visa_resource.query_values("TRACE:DATA?")
+        dataList = self._visa_resource.query_ascii_values("TRACE:DATA?")
         dataDict = {'volts': dataList[0::5],
                     'amps': dataList[1::5],
                     'ohms': dataList[2::5],
@@ -191,7 +191,7 @@ class Keithley2400():
 
         source = self.getSource()[0]  # either 'voltage' or 'current'
 
-        nSteps = int((rampStart - rampTarget) / step)
+        nSteps = ceil((rampStart - rampTarget) / step)
 
         for sourceValue in linspace(rampStart, rampTarget, nSteps):
             self.setSourceDC(source, sourceValue)
@@ -362,7 +362,7 @@ class Keithley2400():
 
         self._visa_resource.write("TRACE:FEED:CONTROL NEXT")
         self._visa_resource.write("INIT")
-        self._visa_resource.trigger()
+        self._visa_resource.assert_trigger()
         self._catchSRQ()
         self._pullData()
 
