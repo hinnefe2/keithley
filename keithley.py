@@ -90,7 +90,10 @@ class Keithley2400():
             self._clearData()
 
             self.data = pd.DataFrame()
-      
+     
+            # needed to trim the trailing '\n' from instrument responses
+            self._visa_resource.read_termination = '\n'
+
             assert len(self._visa_resource.query("*IDN?")) > 0 , 'Instrument identification failed.'
 
         except NameError:
@@ -173,7 +176,7 @@ class Keithley2400():
         self._visa_resource.write("TRACE:CLEAR")
         self._visa_resource.query("STATUS:MEASUREMENT?")
 
-    def _rampOutput(self, rampStart, rampTarget, nSteps=20, timeStep=50E-3):
+    def _rampOutput(self, rampStart, rampTarget, step, timeStep=50E-3):
         """Ramp the output smoothly from one value to another.
 
         Arguments:
@@ -188,11 +191,12 @@ class Keithley2400():
 
         source = self.getSource()[0]  # either 'voltage' or 'current'
 
+        nSteps = int((rampStart - rampTarget) / step)
+
         for sourceValue in linspace(rampStart, rampTarget, nSteps):
             self.setSourceDC(source, sourceValue)
             time.sleep(timeStep)
 
-        return sourceValue
 
     ##############################################################
     # Configuration methods: use these to configure the instrument #
@@ -328,9 +332,9 @@ class Keithley2400():
         source = self._visa_resource.query("SOURCE:FUNCTION:MODE?")
 
         if source == "VOLT":
-            return ('voltage', self._visa_resource.query_values("SOURCE:VOLTAGE:LEVEL?")[0])
+            return ('voltage', self._visa_resource.query("SOURCE:VOLTAGE:LEVEL?")[0])
         elif source == "CURR":
-            return ('current', self._visa_resource.query_values("SOURCE:CURRENT:LEVEL?")[0])
+            return ('current', self._visa_resource.query("SOURCE:CURRENT:LEVEL?")[0])
 
     def getCompliance(self):
         """Get the type and level of the currently configured compliance limit.
@@ -372,6 +376,7 @@ class Keithley2400():
     # starting with the output off, turn the output on then ramp the output up/down to a specified level
     def rampOutputOn(self, rampTarget, step, timeStep=50E-3):
         rampStart = 0
+        self.outputOn()
         sourceValue = self._rampOutput(rampStart, rampTarget, step, timeStep)
         return sourceValue
 
