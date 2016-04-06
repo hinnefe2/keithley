@@ -67,10 +67,12 @@ class Keithley2400():
         getConfig
             Get a string summarizing the current instrument configuration.
 
+        measurePoint
+            Perform a single measurement with the current configuration and store it in the instrument's buffer.
+        readTrace
+            Read the data stored in the instrument's internal buffer, and store it in self.data.
         readPoint
             Perform a single measurement with the current configuration, read the result, and store it in self.data.
-        readTrace
-            Perform a sweep measurement with the current configuration, read the results, and store them in self.data.
         outputOn
             Turn the instrument's output on, at the currently configured source value.
         outputOff
@@ -122,41 +124,28 @@ class Keithley2400():
         self._visa_resource.write("STATUS:MEASUREMENT:ENABLE 512")
         self._visa_resource.write("*SRE 1")
         self._visa_resource.write("ARM:COUNT 1")
+        self._visa_resource.write("TRACE:POINTS %d" % 2500)
         self._visa_resource.write("ARM:SOURCE BUS")
         self._visa_resource.write("TRACE:FEED SENSE1")
         self._visa_resource.write("SYSTEM:TIME:RESET:AUTO 0")
 
-    def _clearData(self):
-        """Clear the saved data from the previous measurement."""
-
-        self._visa_resource.write("TRACE:CLEAR")
-        self.data = pd.DataFrame()
-
-    def _startNoWait(self):
-        """Turn the output on, trigger a measurement, and proceed without waiting for the
-        'measurement is done' signal from the instrument.
-        """
-
-        self._visa_resource.write("OUTPUT ON")
-        self._visa_resource.write("TRACE:FEED:CONTROL NEXT")
-        self._visa_resource.write("INIT")
-        self._visa_resource.assert_trigger()
-
-    def _catchSRQ(self):
-        """Wait for the 'measurement is done' signal from the instrument."""
-
-        self._visa_resource.wait_for_srq(None)
-        self._visa_resource.query("STATUS:MEASUREMENT?")
-
     def _startMeasurement(self):
-        """Start a measurement and wait for the 'measurement is done' signal from the instrument."""
+        """Activate the instrument's internal data storage."""
 
-        self._startNoWait()
-        self._catchSRQ()
+        self._visa_resource.write("TRACE:FEED:CONTROL NEXT")
+
+    def _stopMeasurement(self):
+        """Clear the instrument's internal buffer, and reset status bytes
+        to prepare for a new measurement."""
+
+        self._clearData()
+        self._visa_resource.write("TRACE:FEED:CONTROL NEVER")
+        self._visa_resource.query("STATUS:MEASUREMENT?")
 
     def _pullData(self):
         """Retrieve data from the instrument's internal buffer and store it in self.data."""
 
+        self._visa_resource.write("TRACE:FEED:CONTROL NEXT")
         # returns (V, I, I/V, time, ?) for each data point in a flat list
         # I/V column is only meaningful if the instrument was configured to measure resistance
         dataList = self._visa_resource.query_ascii_values("TRACE:DATA?")
@@ -168,13 +157,12 @@ class Keithley2400():
 
         self.data = self.data.append(dataDF)
 
-    def _stopMeasurement(self):
-        """Turn the output off, clear the instrument's internal buffer, and reset status bytes
-        to prepare for a new measurement."""
+    def _clearData(self):
+        """Clear the data saved in the instrument's buffer."""
 
-        self._visa_resource.write("OUTPUT OFF")
+        self._visa_resource.write("TRACE:FEED:CONTROL NEVER")
         self._visa_resource.write("TRACE:CLEAR")
-        self._visa_resource.query("STATUS:MEASUREMENT?")
+        self._visa_resource.write("TRACE:FEED:CONTROL NEXT")
 
     def _rampOutput(self, rampStart, rampTarget, step, timeStep=50E-3):
         """Ramp the output smoothly from one value to another.
@@ -191,7 +179,10 @@ class Keithley2400():
 
         source = self.getSource()[0]  # either 'voltage' or 'current'
 
-        nSteps = ceil((rampStart - rampTarget) / step)
+        try:
+            nSteps = abs(ceil((rampStart - rampTarget) / step))
+        except ZeroDivisionError:
+            nSteps = 1
 
         for sourceValue in linspace(rampStart, rampTarget, nSteps):
             self.setSourceDC(source, sourceValue)
@@ -343,6 +334,9 @@ class Keithley2400():
             (source, value) -- source: one of ['voltage' | 'current'].
                                value:  the level of the compliance limit, in volts or amps.
         """
+
+        raise NotImplementedError
+
     ########################################################
     # Operation methods: use these to operate the instrument #
     ########################################################
@@ -357,21 +351,27 @@ class Keithley2400():
 
         self._visa_resource.write("OUTPUT OFF")
 
+    def measurePoint(self):
+        """Record a data point in the internal buffer. Read and clear the buffer if it is full."""
+
+        buffer_points = self._visa_resource.query_ascii_values("TRACE:POINTS:ACTUAL?")[0]
+        
+        if buffer_points > 2499:
+            self.readTrace()
+
+        self._visa_resource.write("INIT")
+        self._visa_resource.assert_trigger()
+
     def readPoint(self):
         """Perform a single measurement with the current configuration, read the result, and store it in self.data."""
 
-        self._visa_resource.write("TRACE:FEED:CONTROL NEXT")
-        self._visa_resource.write("INIT")
-        self._visa_resource.assert_trigger()
-        self._catchSRQ()
-        self._pullData()
+        self.measurePoint()
+        self.readTrace()
 
     # perform a measurement w/ current parameters
     def readTrace(self):
-        self._clearData()
-        self._startMeasurement()
         self._pullData()
-        self._stopMeasurement()
+        self._clearData()
 
     # starting with the output off, turn the output on then ramp the output up/down to a specified level
     def rampOutputOn(self, rampTarget, step, timeStep=50E-3):
